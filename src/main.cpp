@@ -20,14 +20,86 @@ const unsigned long LOOP_DELAY_MS = 200;
 const float US_ROUNDTRIP_CM_DIVISOR = 58.0; // Convert microseconds to cm
 const unsigned long US_TIMEOUT_US = 30000; // 30ms timeout for ultrasonic pulse
 
+
+// BMI display class
+struct BMI_Display : LiquidCrystal_I2C {
+  BMI_Display()
+    : LiquidCrystal_I2C(LCD_I2C_ADDR, LCD_COLS, LCD_ROWS) {
+    memcpy(row1, emptyline, LCD_COLS);
+    memcpy(row2, emptyline, LCD_COLS);
+    memcpy(row1 + 8, "BMI=", 4);
+  }
+
+  char row1[LCD_COLS+1], row2[LCD_COLS+1];
+  const char* emptyline = "               ";
+  char
+    *lcd_weight = row1,
+    *lcd_height = row2,
+    *lcd_bmi_value = row1 + 12,
+    *lcd_bmi_word = row2 + 9;
+
+  const char* bmi_words[4] = {
+    "podvaha",
+    "v norme",
+    "nadvaha",
+    "obezita"
+  };
+
+  int weight = 0, height = 0;
+
+  void init() {
+    LiquidCrystal_I2C::init();
+    backlight();
+    clear();
+  }
+
+  void update() {
+    this->setCursor(0, 0);
+    this->print(row1);
+    this->setCursor(0, 1);
+    this->print(row2);
+  }
+
+  void setWeight(int weight) {
+    this->weight = weight;
+    printValue(lcd_weight, 8, "%d kg", weight);
+  }
+
+  void setHeight(int height) {
+    this->height = height;
+    printValue(lcd_height, 7, "%d cm", height);
+  }
+
+  void updateBMI() {
+    float bmi = 10000.0 * weight / height / height;
+    printValue(lcd_bmi_value, 4, bmi);
+    int index = 0;
+    if (bmi > 20) index = 1;
+    if (bmi > 25) index = 2;
+    if (bmi > 30) index = 3;
+    memcpy(lcd_bmi_word, bmi_words[index], 7);
+  }
+
+private:
+  void printValue(char* position, int size, const char* format, int value) {
+    int chars = snprintf(position, size, format, value);
+    if (size > chars) memcpy(position + chars, emptyline, size - chars); // right pad spaces, avoid zerobytes
+  }
+  void printValue(char* position, int size, float value) {
+    dtostrf(value, 2, 1, position); // Arduino does not support snprintf with %f, buffer overflow hazard
+    int chars = strlen(position);
+    if (size > chars) memcpy(position + chars, emptyline, size - chars);
+  }
+};
+
+
 // --- Hardware Objects ---
 HX711 scale;
-LiquidCrystal_I2C lcd(LCD_I2C_ADDR, LCD_COLS, LCD_ROWS);
+BMI_Display lcd;
 
 // --- Function Prototypes ---
 float measureHeightCm();
 float measureWeightKg();
-void updateDisplay(float height, float weight);
 
 void setup() {
   Serial.begin(9600);
@@ -36,34 +108,24 @@ void setup() {
   pinMode(PIN_US_ECHO, INPUT);
 
   lcd.init();
-  lcd.backlight();
-  lcd.clear();
-  lcd.setCursor(0, 0);
-  lcd.print("Initializing...");
 
   scale.begin(PIN_SCALE_DOUT, PIN_SCALE_CLK);
   scale.set_scale(SCALE_CALIBRATION_FACTOR);
   delay(200); // Allow scale to stabilize
   scale.tare(); // Reset scale to 0
-
-  lcd.clear();
 }
 
 void loop() {
   float currentHeight = measureHeightCm();
   float currentWeight = measureWeightKg();
 
-  // Clamp negative values to zero
-  if (currentHeight < 0) currentHeight = 0;
-  if (currentWeight < 0) currentWeight = 0;
+  if (currentHeight > 0 && currentWeight > 0) {
+    lcd.setWeight(currentWeight);
+    lcd.setHeight(currentHeight);
+    lcd.updateBMI();
+  }
 
-  updateDisplay(currentHeight, currentWeight);
-
-  Serial.print("Height: ");
-  Serial.print(currentHeight);
-  Serial.print(" Weight: ");
-  Serial.println(currentWeight);
-
+  lcd.update();
   delay(LOOP_DELAY_MS);
 }
 
@@ -97,16 +159,4 @@ float measureWeightKg() {
   }
 
   return -1; // Scale not ready
-}
-
-void updateDisplay(float height, float weight) {
-  lcd.setCursor(0, 0);
-  lcd.print("Weight: ");
-  lcd.print(weight, 1);
-  lcd.print(" kg   "); // Clear leftover digits
-
-  lcd.setCursor(0, 1);
-  lcd.print("Height: ");
-  lcd.print((int)height);
-  lcd.print(" cm   "); // Clear leftover digits
 }
