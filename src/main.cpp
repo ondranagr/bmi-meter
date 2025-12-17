@@ -17,9 +17,11 @@ const int LCD_ROWS = 2;
 const int LCD_I2C_ADDR = 0x27;
 const int SCALE_SAMPLES = 5; // Average over 5 readings
 const unsigned long LOOP_DELAY_MS = 200;
-const float US_ROUNDTRIP_CM_DIVISOR = 58.0; // Convert microseconds to cm
+const float SOUND_TIME_US_PER_CM = 29.15452;
 const unsigned long US_TIMEOUT_US = 30000; // 30ms timeout for ultrasonic pulse
 
+// --- Scratch memory ---
+char buffer[50];
 
 // BMI display class
 struct BMI_Display : LiquidCrystal_I2C {
@@ -27,7 +29,7 @@ struct BMI_Display : LiquidCrystal_I2C {
     : LiquidCrystal_I2C(LCD_I2C_ADDR, LCD_COLS, LCD_ROWS) {
     memcpy(row1, emptyline, LCD_COLS);
     memcpy(row2, emptyline, LCD_COLS);
-    memcpy(row1 + 8, "BMI=", 4);
+    row1[LCD_COLS] = row2[LCD_COLS] = 0; // zerobyte at the end of the strings so lcd.print() works correctly
   }
 
   char row1[LCD_COLS+1], row2[LCD_COLS+1];
@@ -43,6 +45,15 @@ struct BMI_Display : LiquidCrystal_I2C {
     "v norme",
     "nadvaha",
     "obezita"
+  };
+
+  const float bmi_values[6][3] = {
+    {13.0, 16.5, 18.0},
+    {13.5, 18.0, 20.0},
+    {14.0, 19.5, 22.5},
+    {15.5, 22.5, 25.0},
+    {17.0, 24.0, 28.0},
+    {19.0, 25.0, 30.0}
   };
 
   int weight = 0, height = 0;
@@ -72,12 +83,23 @@ struct BMI_Display : LiquidCrystal_I2C {
 
   void updateBMI() {
     float bmi = 10000.0 * weight / height / height;
+    memcpy(lcd_bmi_value - 4, "BMI=", 4);
     printValue(lcd_bmi_value, 4, bmi);
+    int i = getHeightIndex();
     int index = 0;
-    if (bmi > 20) index = 1;
-    if (bmi > 25) index = 2;
-    if (bmi > 30) index = 3;
+    if(bmi > bmi_values[i][0]) index = 1;
+    if(bmi > bmi_values[i][1]) index = 2;
+    if(bmi > bmi_values[i][2]) index = 3;
     memcpy(lcd_bmi_word, bmi_words[index], 7);
+  }
+
+  void message(const char* line1, const char* line2 = "") {
+    int len1 = strlen(line1), len2 = strlen(line2);
+    if (len1 > LCD_COLS || len2 > LCD_COLS) return;
+    memcpy(row1, emptyline, LCD_COLS);
+    memcpy(row2, emptyline, LCD_COLS);
+    memcpy(row1 + (LCD_COLS-len1)/2, line1, len1);
+    memcpy(row2 + (LCD_COLS-len2)/2, line2, len2);
   }
 
 private:
@@ -86,9 +108,16 @@ private:
     if (size > chars) memcpy(position + chars, emptyline, size - chars); // right pad spaces, avoid zerobytes
   }
   void printValue(char* position, int size, float value) {
-    dtostrf(value, 2, 1, position); // Arduino does not support snprintf with %f, buffer overflow hazard
+    dtostrf(value, 2, 1, buffer); // Arduino does not support snprintf with %f
+    memcpy(position, buffer, size);
     int chars = strlen(position);
     if (size > chars) memcpy(position + chars, emptyline, size - chars);
+  }
+
+  int getHeightIndex() {
+    const int height_groups[5] = { 115, 130, 145, 155, 165 }; // cm
+    for(int i=0; i<5; ++i) if (height < height_groups[i]) return i;
+    return 5;
   }
 };
 
@@ -137,14 +166,13 @@ float measureHeightCm() {
   delayMicroseconds(10);
   digitalWrite(PIN_US_TRIG, LOW);
 
-  long duration = pulseIn(PIN_US_ECHO, HIGH, US_TIMEOUT_US);
+  long echoTime = pulseIn(PIN_US_ECHO, HIGH, US_TIMEOUT_US);
 
-  if (duration == 0) {
+  if (echoTime == 0) {
     return -1; // No echo received (out of range)
   }
 
-  // Convert time to distance and subtract from sensor height
-  float distanceCm = duration / US_ROUNDTRIP_CM_DIVISOR;
+  float distanceCm = echoTime / (SOUND_TIME_US_PER_CM * 2);
 
   if (distanceCm > SENSOR_MOUNT_HEIGHT_CM || distanceCm < 10) {
     return -1; // Out of range
