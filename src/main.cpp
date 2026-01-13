@@ -16,9 +16,14 @@ const int LCD_COLS = 16;
 const int LCD_ROWS = 2;
 const int LCD_I2C_ADDR = 0x27;
 const int SCALE_SAMPLES = 5; // Average over 5 readings
-const unsigned long LOOP_DELAY_MS = 200;
+const unsigned long LOOP_DELAY_MS = 500;
 const float SOUND_TIME_US_PER_CM = 29.15452;
 const unsigned long US_TIMEOUT_US = 30000; // 30ms timeout for ultrasonic pulse
+
+// --- Stability Check Constants ---
+const float WEIGHT_TOLERANCE_KG = 2.0; // Maximum weight difference for stability
+const float HEIGHT_TOLERANCE_CM = 3.0; // Maximum height difference for stability
+const int STABLE_READINGS_REQUIRED = 5; // Number of consecutive stable readings needed
 
 // --- Scratch memory ---
 char buffer[50];
@@ -96,8 +101,11 @@ struct BMI_Display : LiquidCrystal_I2C {
   void message(const char* line1, const char* line2 = "") {
     int len1 = strlen(line1), len2 = strlen(line2);
     if (len1 > LCD_COLS || len2 > LCD_COLS) return;
-    memcpy(row1, emptyline, LCD_COLS);
-    memcpy(row2, emptyline, LCD_COLS);
+    // Clear entire display buffer first
+    memset(row1, ' ', LCD_COLS);
+    memset(row2, ' ', LCD_COLS);
+    row1[LCD_COLS] = row2[LCD_COLS] = 0;
+    // Center and copy the new text
     memcpy(row1 + (LCD_COLS-len1)/2, line1, len1);
     memcpy(row2 + (LCD_COLS-len2)/2, line2, len2);
   }
@@ -121,10 +129,44 @@ private:
   }
 };
 
+// --- Stability Tracking ---
+struct StabilityTracker {
+  float lastWeight = 0;
+  float lastHeight = 0;
+  int stableCount = 0;
+  bool wasStable = false;
+
+  bool checkStability(float currentWeight, float currentHeight, bool &movementDetected) {
+    movementDetected = false;
+    
+    bool stable = (fabs(currentWeight - lastWeight) <= WEIGHT_TOLERANCE_KG) &&
+                  (fabs(currentHeight - lastHeight) <= HEIGHT_TOLERANCE_CM);
+    
+    if (stable) {
+      stableCount++;
+    } else {
+      stableCount = 0;
+      movementDetected = true;
+    }
+
+    lastWeight = currentWeight;
+    lastHeight = currentHeight;
+
+    return stableCount >= STABLE_READINGS_REQUIRED;
+  }
+
+  void reset() {
+    stableCount = 0;
+    lastWeight = 0;
+    lastHeight = 0;
+    wasStable = false;
+  }
+};
 
 // --- Hardware Objects ---
 HX711 scale;
 BMI_Display lcd;
+StabilityTracker stability;
 
 // --- Function Prototypes ---
 float measureHeightCm();
@@ -148,13 +190,51 @@ void loop() {
   float currentHeight = measureHeightCm();
   float currentWeight = measureWeightKg();
 
-  if (currentHeight > 0 && currentWeight > 0) {
-    lcd.setWeight(currentWeight);
-    lcd.setHeight(currentHeight);
-    lcd.updateBMI();
+  Serial.print("Height: ");
+  Serial.print(currentHeight);
+  Serial.print(" cm, Weight: ");
+  Serial.print(currentWeight);
+  Serial.println(" kg");
+
+  // Check if person is on the scale
+  if (currentWeight < 10 || currentHeight < 100) {
+    lcd.message("Stoupni si", "na vahu");
+    lcd.update();
+    stability.reset();
+    delay(LOOP_DELAY_MS);
+    return;
   }
 
+  // Check if measurements are stable
+  bool movementDetected = false;
+  bool isStable = stability.checkStability(currentWeight, currentHeight, movementDetected);
+  
+  if (movementDetected) {
+    // Movement detected - ask user to stay still
+    lcd.message("Stuj klidne", "a rovne");
+    lcd.update();
+    delay(LOOP_DELAY_MS);
+    return;
+  }
+  
+  if (!isStable) {
+    // Checking for value stabilization is in progress
+    lcd.message("Probiha", "mereni...");
+    lcd.update();
+    delay(LOOP_DELAY_MS);
+    return;
+  }
+
+  // Measurements are valid and stable - display results
+  // Clear both rows first to avoid leftover characters from previous messages
+  memcpy(lcd.row1, lcd.emptyline, LCD_COLS);
+  memcpy(lcd.row2, lcd.emptyline, LCD_COLS);
+
+  lcd.setWeight((int)currentWeight);
+  lcd.setHeight((int)currentHeight);
+  lcd.updateBMI();
   lcd.update();
+
   delay(LOOP_DELAY_MS);
 }
 
